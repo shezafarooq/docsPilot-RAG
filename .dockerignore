@@ -1,0 +1,15 @@
+.git
+.aws
+.agents
+.codex
+.env
+.env.*
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+data
+qdrant_storage
+model_cache
+*.pem
+*.key

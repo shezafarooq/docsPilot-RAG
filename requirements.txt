@@ -1,0 +1,9 @@
+# The CPU build of torch is installed first by the Dockerfile.
+fastapi>=0.115,<1.0
+uvicorn>=0.34,<1.0
+pydantic-settings>=2.9,<3.0
+torch==2.8.0
+sentence-transformers>=5.1,<6
+transformers>=4.41,<5
+qdrant-client>=1.15,<2
+beautifulsoup4>=4.13,<5
