@@ -30,6 +30,31 @@ def request_json(url: str, headers: dict[str, str], body: dict | None = None) ->
         return json.load(response)
 
 
+
+def request_json_stream(url: str, headers: dict[str, str], body: dict):
+    """Read Gemini's SSE packets without buffering the whole response."""
+    request = Request(url, headers={**headers, "Content-Type": "application/json"},
+                      data=json.dumps(body).encode())
+    with build_opener(NoRedirects()).open(request, timeout=30) as response:
+        data = []
+        size = 0
+        for raw in response:
+            line = raw.decode("utf-8").rstrip("\r\n")
+            if not line:
+                if data:
+                    yield json.loads("\n".join(data))
+                    data = []
+                    size = 0
+            elif line.startswith("data:"):
+                part = line[5:].lstrip(" ")
+                size += len(part)
+                if size > 1_000_000:
+                    raise ValueError("Provider packet too large")
+                data.append(part)
+        if data:
+            yield json.loads("\n".join(data))
+
+
 def report_error(service: str, error: Exception) -> None:
     if isinstance(error, HTTPError):
         hints = {

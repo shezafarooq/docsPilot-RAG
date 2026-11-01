@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     qdrant_collection: str = "docspilot"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     data_dir: Path = Path("data")
+    checkpoint_path: Path = Path("data/checkpoints.sqlite3")
     langfuse_public_key: str = ""
     langfuse_secret_key: SecretStr = SecretStr("")
     langfuse_base_url: str = ""

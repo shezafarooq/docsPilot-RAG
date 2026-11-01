@@ -7,7 +7,11 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+THREAD_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+
+
 class AskRequest(StrictModel):
+    thread_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=THREAD_ID_PATTERN)
     question: str = Field(min_length=1, max_length=2000,
                           examples=["How do I mount a volume in Docker Compose?"])
 
@@ -28,6 +32,10 @@ class GradeDecision(StrictModel):
 
 class RewriteDecision(StrictModel):
     query: str = Field(min_length=1, max_length=500)
+
+
+class StandaloneQuestion(StrictModel):
+    question: str = Field(min_length=1, max_length=2000)
 
 
 class Statement(StrictModel):
@@ -58,3 +66,16 @@ class AskResponse(StrictModel):
     retrieval_attempts: int = 0
     rewrite_count: int = 0
     trace_id: str | None = None
+    thread_id: str | None = None
+    resolved_question: str | None = None
+
+
+class ChatTurn(StrictModel):
+    question: str
+    resolved_question: str
+    response: AskResponse
+
+
+class ThreadHistory(StrictModel):
+    thread_id: str
+    turns: list[ChatTurn] = Field(default_factory=list)

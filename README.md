@@ -15,6 +15,8 @@ flowchart TD
     Docs[Selected public documentation] --> Ingest[Clean and split into passages]
     Ingest --> Embed[Local CPU sentence-transformer]
     Embed --> Qdrant[(Qdrant: vectors, text, source links)]
+    Chat[Next.js chat] --> Stream[POST /ask/stream]
+    Stream --> Route
     Ask[POST /ask] --> Route{Greeting?}
     Route -->|Yes| Direct[Direct response]
     Route -->|No| Retrieve[Retrieve top five passages]
@@ -31,8 +33,9 @@ flowchart TD
 
 Local ingestion and semantic retrieval over 11 selected Docker and FastAPI documentation
 pages or sections, with Gemini answers, source citations, a corrective LangGraph
-workflow, optional Langfuse tracing, and a GitHub Actions CI workflow. Streaming,
-frontend, and EC2 deployment are later milestones.
+workflow, optional Langfuse tracing, a Next.js chat interface, and GitHub Actions CI.
+Persistent SQLite conversation checkpoints are enabled; EC2 deployment is a later milestone.
+The chat now streams real graph progress and citation-checked answer sections.
 
 ## Local setup
 
@@ -48,6 +51,7 @@ Prerequisites: Docker with Docker Compose. Host Python is optional when using Do
    ```
 
 4. Open:
+   - Chat interface: http://localhost:3001
    - API liveness: http://localhost:8000/health
    - Interactive API docs: http://localhost:8000/docs
    - Qdrant dashboard: http://localhost:6333/dashboard
@@ -83,7 +87,9 @@ Qdrant runs locally in Docker; no Qdrant account or separate installation is req
 
 Inside Compose, Python connects to Qdrant using `http://qdrant:6333`.
 Python running directly on the host would use `http://localhost:6333`.
-Both published ports are bound to the local computer only.
+All published ports are bound to the local computer only.
+The Next.js server forwards browser requests from `/api/chat` to `http://api:8000/ask`;
+the browser never needs the internal Compose service address or backend credentials.
 Qdrant data lives in the `qdrant_data` named volume and survives container recreation.
 
 ```bash
@@ -235,8 +241,8 @@ from `requirements.txt` and workflow dependencies from `requirements-agent.txt`.
 
 ## Next milestone
 
-Check the first GitHub Actions run, then prepare the one-time EC2 deployment.
-Streaming and a tiny Next.js frontend remain optional.
+Prepare the one-time EC2 deployment after local checks pass.
+Prepare the one-time EC2 deployment after local checks pass.
 
 ## GitHub Actions
 
@@ -264,3 +270,149 @@ cp .env.example .env
 Add credentials to your local `.env`, then follow the setup and ingestion steps
 above. Commit source code, tests, and `.env.example`; keep `.env`, downloaded data,
 model caches, and private keys out of the repository.
+
+## Next.js chat interface
+
+Start the complete application with Docker Desktop running:
+
+```bash
+docker compose up -d --build --wait
+```
+
+Open http://localhost:3001. The interface supports question suggestions, Markdown and
+code blocks, clickable numbered citations, expandable source passages, request details,
+loading states, stopping a pending browser request, and retrying failed questions.
+A successful `not_found` response is displayed separately from transport errors.
+Stopping the browser request does not guarantee an already-running Gemini call stops.
+
+Each chat has a `thread_id`, kept in the browser tab's session storage. Refreshing
+restores completed turns from the API. New chat creates a different ID and clears the
+visible transcript; it does not delete the old checkpoints. The page receives real graph progress and answer-section previews over SSE.
+Previews are labeled until the full structured answer passes final validation.
+
+Frontend files:
+
+- `frontend/app/page.jsx`: chat interface and request state.
+- `frontend/app/globals.css`: responsive layout and styling.
+- `frontend/app/api/chat/route.js`: server-side FastAPI proxy entry point.
+- `frontend/lib/proxy.mjs`: input checks, upstream timeout and safe error handling.
+- `frontend/lib/chat.mjs`: response checks, source URL checks and citation linking.
+- `frontend/lib/stream.mjs`: reads SSE events across network packet boundaries.
+- `frontend/app/api/chat/stream/route.js`: forwards the live answer stream.
+- `frontend/Dockerfile`: dependency, build and unprivileged runtime stages.
+- `frontend/tests/proxy.test.mjs`: proxy, citation and error-handling tests.
+
+No host Node.js installation is required when using Docker. To rebuild only the UI:
+
+```bash
+docker compose up -d --build --wait frontend
+docker compose logs --tail=50 frontend
+```
+
+For optional development outside Docker, install Node.js 22, then run:
+
+```bash
+cd frontend
+npm ci
+npm test
+npm run dev -- --port 3001
+```
+
+`API_BASE_URL` defaults to `http://localhost:8000`; Compose overrides it on the server.
+Never put Gemini or Langfuse keys in a `NEXT_PUBLIC_` variable.
+
+The chat port defaults to 3001. Set `FRONTEND_PORT` in the root `.env` to change it.
+
+## Streaming
+
+The chat uses `POST /api/chat/stream` on Next.js, which forwards the response body
+from FastAPI's `POST /ask/stream` without buffering it. The original JSON `/ask`
+and `/api/chat` endpoints remain available.
+
+```bash
+curl -N http://localhost:8000/ask/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"How do I mount a volume in Docker Compose?"}'
+```
+
+Events are `status` (the actual graph node starting), `answer` (a cumulative preview),
+`reset` (discard a previous preview), `result` (the final validated AskResponse),
+`done`, or `error`. Input errors before streaming still use ordinary HTTP status
+codes. Once the stream starts, service errors are sent as `error` events containing
+`detail` and `status_code`; a 200 stream alone does not mean the question succeeded.
+
+Only answer generation uses Gemini's `streamGenerateContent` API. Grading and
+rewriting still use their existing structured calls. Complete prose/code statements
+are extracted as provider packets arrive, validated against the statement schema,
+and rendered using the existing citation checks. No artificial typing delay is used.
+A one-statement answer may appear at once; sections cannot appear before generation
+begins. Previews do not bypass final schema and finish-reason checks. Errors, stopped
+requests and retries clear unfinished previews. Semantic grounding remains an LLM
+judgment, as before. Transport retries are disabled after any provider packet arrives.
+
+Langfuse keeps the request, node and generation traces, including final usage metadata.
+Streaming and JSON requests share the same checkpointed conversation when given the same thread ID. Stopping closes the browser connection;
+already-running synchronous provider work can continue until its current call ends.
+
+`app/streaming.py` frames SSE events, reads complete answer statements, and keeps
+graph execution in one worker with bounded buffering, disconnect cleanup and
+keep-alive comments during long model calls.
+
+## Conversation memory and thread IDs
+
+`POST /ask` and `POST /ask/stream` accept an optional `thread_id`. Reuse it for
+follow-up questions. If omitted, the server creates a fresh ID and returns it; use
+that returned ID to continue the chat. IDs contain 1–128 letters, digits, underscores
+or hyphens and begin with a letter or digit. The frontend generates UUIDs.
+
+```bash
+curl -sS http://localhost:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"How do I mount a named volume in Docker Compose?","thread_id":"docker-demo"}'
+
+curl -sS http://localhost:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Can you show the YAML for that?","thread_id":"docker-demo"}'
+
+curl -sS http://localhost:8000/threads/docker-demo
+```
+
+The compiled LangGraph uses `SqliteSaver`. Every invocation supplies
+`configurable.thread_id`, which selects the saved graph state. For a follow-up, a
+context node uses up to six recent completed turns to produce a standalone question.
+Each prior answer is capped at 2,000 characters in that context prompt. Retrieval,
+grading, query rewriting and generation use the resolved question and fresh retrieved
+evidence. Conversation history is not passed as evidence to the answer generator.
+The original user wording and the resolved question are both saved. Request details
+show the thread ID and understood question.
+
+A finish node records only completed turns, including supported answers, greetings
+and normal `not_found` responses. Provider failures are not saved as completed turns.
+Each new question resets retrieved passages, selected evidence, results and the retry
+budget, so previous evidence cannot accidentally become the next question's answer.
+The current graph state retains the latest 20 completed turns; older checkpoint
+snapshots remain in SQLite. This is not an automatic database retention policy.
+
+Compose stores `/app/conversations/checkpoints.sqlite3` in the named
+`conversation_data` volume. It survives API restarts, rebuilds and `docker compose down`.
+`docker compose down -v` deletes project volumes, including this conversation history.
+Outside Docker, `CHECKPOINT_PATH` defaults to `data/checkpoints.sqlite3`.
+
+The frontend restores the current tab's thread through `/api/chat/history`, which
+proxies `GET /threads/{thread_id}`. A new browser tab normally starts a new chat;
+duplicating a tab may copy its session storage. New chat always generates a new ID.
+Previous chats can still be read through the API using their IDs; there is no chat-list
+or delete interface yet. This is a local single-worker application: thread IDs select
+conversations and are not authentication credentials. Streaming follow-ups for a busy thread show a waiting status and wait up to 90
+seconds for the previous run to finish. JSON requests still return 409 on overlap,
+and a streaming wait that exceeds the limit returns an SSE error. Other threads
+can continue independently. Completion events are emitted only after the thread
+lock is released.
+Multi-worker deployment would need coordination beyond this process-local lock.
+
+New files: `app/memory.py` owns SQLite and thread guards; `tests/test_memory.py`
+checks follow-up resolution, restart persistence, isolation and bounded history.
+`langgraph-checkpoint-sqlite` is included in `requirements-agent.txt`.
+Follow-ups add one Gemini context-resolution call before retrieval; greetings still
+use no model calls. An already-running request may finish after the browser stops it;
+refreshing will show any completed turn that was checkpointed.

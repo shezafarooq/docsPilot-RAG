@@ -60,3 +60,36 @@ jobs:
       - name: Remove startup-check container
         if: always()
         run: docker rm -f docspilot-smoke || true
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build and test frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          load: true
+          push: false
+          tags: docspilot-frontend:ci
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+      - name: Check frontend startup and API error handling
+        run: |
+          docker run -d --name docspilot-frontend-smoke --network none docspilot-frontend:ci
+          for attempt in $(seq 1 30); do
+            if docker exec docspilot-frontend-smoke node -e "fetch('http://127.0.0.1:3000').then(async r => { if (!r.ok || !(await r.text()).includes('DocsPilot')) process.exit(1); }).catch(() => process.exit(1))" >/dev/null 2>&1; then
+              docker exec docspilot-frontend-smoke node --input-type=module -e "for (const path of ['/api/chat', '/api/chat/stream']) { const r = await fetch('http://127.0.0.1:3000' + path, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:'Hi'})}); if (r.status !== 502) process.exit(1); }"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs docspilot-frontend-smoke
+          exit 1
+      - name: Remove frontend startup-check container
+        if: always()
+        run: docker rm -f docspilot-frontend-smoke || true

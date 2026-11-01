@@ -10,7 +10,7 @@ from pydantic import BaseModel, ValidationError
 from app.config import get_settings
 from app.errors import ServiceError
 from app.telemetry import observation, update_observation
-from app.verify_access import request_json
+from app.verify_access import request_json, request_json_stream
 
 
 class GeminiClient:
@@ -29,7 +29,25 @@ class GeminiClient:
                     raise
             time.sleep(1)
 
-    def generate(self, instruction: str, data: dict, schema: type[BaseModel], *, task: str):
+    @staticmethod
+    def _stream_request(url, headers, body):
+        # Retrying after emitting output could duplicate or contradict the preview.
+        started = False
+        for attempt in range(2):
+            try:
+                for packet in request_json_stream(url, headers, body):
+                    started = True
+                    yield packet
+                return
+            except HTTPError as error:
+                if started or error.code not in {500, 502, 503, 504} or attempt == 1:
+                    raise
+            except (URLError, TimeoutError):
+                if started or attempt == 1:
+                    raise
+            time.sleep(1)
+
+    def generate(self, instruction: str, data: dict, schema: type[BaseModel], *, task: str, on_partial=None):
         settings = get_settings()
         model = settings.gemini_model.removeprefix("models/")
         key = settings.gemini_api_key.get_secret_value()
@@ -46,10 +64,31 @@ class GeminiClient:
         }
         with observation(f"gemini.{task}", input=data, kind="generation", model=model) as span:
             try:
-                result = self._request(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                    {"x-goog-api-key": key}, body,
-                )
+                if on_partial is None:
+                    result = self._request(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        {"x-goog-api-key": key}, body,
+                    )
+                else:
+                    text = ""
+                    finish = None
+                    usage = {}
+                    for packet in self._stream_request(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse",
+                        {"x-goog-api-key": key}, body,
+                    ):
+                        candidate = (packet.get("candidates") or [{}])[0]
+                        delta = "".join(part.get("text", "") for part in candidate.get("content", {}).get("parts", [])
+                                        if not part.get("thought"))
+                        text += delta
+                        if len(text) > 512_000:
+                            raise ValueError("Provider output too large")
+                        finish = candidate.get("finishReason", finish)
+                        usage = packet.get("usageMetadata", usage)
+                        if delta:
+                            on_partial(text)
+                    result = {"candidates": [{"finishReason": finish, "content": {"parts": [{"text": text}]}}],
+                              "usageMetadata": usage}
             except HTTPError as error:
                 if error.code == 429:
                     raise ServiceError("Gemini quota or rate limit reached. Check AI Studio usage and try again later.", 429) from None

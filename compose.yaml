@@ -1,6 +1,24 @@
 services:
+  frontend:
+    build: ./frontend
+    environment:
+      API_BASE_URL: http://api:8000
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3001}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
   api:
     build: .
+    environment:
+      CHECKPOINT_PATH: /app/conversations/checkpoints.sqlite3
     env_file:
       - .env
     ports:
@@ -8,6 +26,7 @@ services:
     volumes:
       - ./data:/app/data
       - model_cache:/app/model_cache
+      - conversation_data:/app/conversations
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 10s
@@ -25,3 +44,4 @@ services:
 volumes:
   qdrant_data:
   model_cache:
+  conversation_data:

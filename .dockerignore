@@ -13,3 +13,9 @@ qdrant_storage
 model_cache
 *.pem
 *.key
+
+# Next.js frontend build artifacts
+**/node_modules/
+**/.next/
+**/out/
+*.tsbuildinfo
